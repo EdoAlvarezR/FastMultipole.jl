@@ -654,12 +654,12 @@ function downward_pass_singlethread_1!(tree::Tree{TF,<:Any}, expansion_order, la
     end
 end
 
-function downward_pass_singlethread_2!(tree::Tree{TF,<:Any}, systems, expansion_order, lamb_helmholtz, derivatives_switches, gradient_n_m) where TF
+function downward_pass_singlethread_2!(tree::Tree{TF,<:Any}, systems, expansion_order, lamb_helmholtz, derivatives_switches, gradient_n_m, curl_extras=Val(false)) where TF
 
     harmonics = initialize_harmonics(expansion_order, TF)
     # loop over systems
     for (i_system, system) in enumerate(systems)
-        evaluate_local!(system, i_system, tree, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches)
+        evaluate_local!(system, i_system, tree, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches, curl_extras)
     end
 
 end
@@ -733,7 +733,7 @@ function downward_pass_multithread_1!(tree::Tree{TF,<:Any}, expansion_order, lam
     end
 end
 
-function downward_pass_multithread_2!(tree::Tree{TF,<:Any}, systems, derivatives_switches, expansion_order, lamb_helmholtz, n_threads) where TF
+function downward_pass_multithread_2!(tree::Tree{TF,<:Any}, systems, derivatives_switches, expansion_order, lamb_helmholtz, n_threads, curl_extras=Val(false)) where TF
     
     #--- load balance ---#
 
@@ -783,19 +783,19 @@ function downward_pass_multithread_2!(tree::Tree{TF,<:Any}, systems, derivatives
             these_gradient_n_m = gradient_n_m[i_thread]
             for i_leaf in leaf_assignment
                 i_branch = leaf_index[i_leaf]
-                evaluate_local!(system, i_system, tree, i_branch, these_harmonics, these_gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches)
+                evaluate_local!(system, i_system, tree, i_branch, these_harmonics, these_gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches, curl_extras)
             end
         end
     end
 end
 
-function downward_pass_multithread!(tree, systems, derivatives_switch, expansion_order, lamb_helmholtz, n_threads)
+function downward_pass_multithread!(tree, systems, derivatives_switch, expansion_order, lamb_helmholtz, n_threads, curl_extras=Val(false))
 
     # m2m translation
     downward_pass_multithread_1!(tree, expansion_order, lamb_helmholtz, n_threads)
 
     # local to body interaction
-    downward_pass_multithread_2!(tree, systems, derivatives_switch, expansion_order, lamb_helmholtz, n_threads)
+    downward_pass_multithread_2!(tree, systems, derivatives_switch, expansion_order, lamb_helmholtz, n_threads, curl_extras)
 
 end
 
@@ -1028,6 +1028,7 @@ function fmm!(target_systems::Tuple, target_tree::Tree, source_systems::Tuple, s
     t_source_tree=0.0, t_target_tree=0.0, t_lists=0.0,
     silence_warnings=false,
     extra_farfield=false,
+    curl_extras=false,
     direct_conditioning=(),
 )
 
@@ -1182,7 +1183,7 @@ function fmm!(target_systems::Tuple, target_tree::Tree, source_systems::Tuple, s
                 if downward_pass
                     t_dp = @elapsed downward_pass_singlethread_1!(target_tree, expansion_order, lamb_helmholtz)
                     t_dp += @elapsed gradient_n_m = initialize_gradient_n_m(expansion_order, eltype(target_tree.branches[1]))
-                    t_dp += @elapsed downward_pass_singlethread_2!(target_tree, target_tree.buffers, expansion_order, lamb_helmholtz, derivatives_switches, gradient_n_m)
+                    t_dp += @elapsed downward_pass_singlethread_2!(target_tree, target_tree.buffers, expansion_order, lamb_helmholtz, derivatives_switches, gradient_n_m, Val(curl_extras))
                     # println("Downward pass time: ", t_dp)
                 end
 
@@ -1264,7 +1265,7 @@ function fmm!(target_systems::Tuple, target_tree::Tree, source_systems::Tuple, s
                 # @time downward_pass && downward_pass_singlethread!(tree.branches, tree.leaf_index, systems, expansion_order, lamb_helmholtz, derivatives_switches)
                 t_dp = 0.0
                 if downward_pass
-                    t_dp = @elapsed downward_pass_multithread!(target_tree, target_tree.buffers, derivatives_switches, expansion_order, lamb_helmholtz, n_threads)
+                    t_dp = @elapsed downward_pass_multithread!(target_tree, target_tree.buffers, derivatives_switches, expansion_order, lamb_helmholtz, n_threads, Val(curl_extras))
                     # println("Downward pass time: $t_dp")
                 end
 

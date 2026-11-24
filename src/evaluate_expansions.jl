@@ -1,15 +1,21 @@
-function evaluate_local!(system, i_system, tree::Tree, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches)
+# NOTE: `curl_extras::Val` (whether to add the curl of the vector field and its
+#       gradient to the extra outputs, see `evaluate_local_curl`) is the last
+#       argument; the methods without it do not add them
+evaluate_local!(system, i_system, tree::Tree, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches) =
+    evaluate_local!(system, i_system, tree, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches, Val(false))
+
+function evaluate_local!(system, i_system, tree::Tree, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches, curl_extras::Val)
 
     # loop over leaf branches
     for i_branch in tree.leaf_index
-        evaluate_local!(system, i_system, tree, i_branch, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches)
+        evaluate_local!(system, i_system, tree, i_branch, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches, curl_extras)
     end
 end
 
-function evaluate_local!(system, i_system, tree::Tree, i_branch, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches)
+function evaluate_local!(system, i_system, tree::Tree, i_branch::Integer, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches, curl_extras::Val=Val(false))
     branch = tree.branches[i_branch]
     local_expansion = view(tree.expansions, :, :, :, i_branch)
-    evaluate_local!(system, branch.bodies_index[i_system], harmonics, gradient_n_m, local_expansion, branch.center, expansion_order, lamb_helmholtz, derivatives_switches[i_system])
+    evaluate_local!(system, branch.bodies_index[i_system], harmonics, gradient_n_m, local_expansion, branch.center, expansion_order, lamb_helmholtz, derivatives_switches[i_system], curl_extras)
 end
 
 # function evaluate_local!(systems::Tuple, branch::Branch, harmonics, gradient_n_m, expansion_order, lamb_helmholtz, derivatives_switches)
@@ -30,7 +36,7 @@ end
 #     evaluate_local!(system, branch.bodies_index, harmonics, gradient_n_m, branch.local_expansion, branch.center, expansion_order, lamb_helmholtz, derivatives_switch)
 # end
 
-function evaluate_local!(system, bodies_index, harmonics, gradient_n_m, local_expansion, expansion_center, expansion_order, lamb_helmholtz, derivatives_switch::DerivativesSwitch{PS,GS,HS}) where {PS,GS,HS}
+function evaluate_local!(system, bodies_index, harmonics, gradient_n_m, local_expansion, expansion_center, expansion_order, lamb_helmholtz, derivatives_switch::DerivativesSwitch{PS,GS,HS,NO}, ::Val{CE}=Val(false)) where {PS,GS,HS,NO,CE}
     for i_body in bodies_index
         pos = get_position(system, i_body)
         scalar_potential, gradient, hessian = evaluate_local(pos - expansion_center, harmonics, gradient_n_m, local_expansion, expansion_order, lamb_helmholtz, derivatives_switch)
@@ -40,7 +46,90 @@ function evaluate_local!(system, bodies_index, harmonics, gradient_n_m, local_ex
         GS && set_gradient!(system, derivatives_switch, i_body, gradient)
 
         HS && set_hessian!(system, derivatives_switch, i_body, hessian)
+
+        # Curl of the vector field and its gradient, added to the extra outputs 1:12
+        # (needs the coefficients that `evaluate_local` leaves in `gradient_n_m`
+        # when the hessian is requested)
+        if CE && HS && NO >= 12 && lamb_helmholtz isa Val{true}
+            curl, gradcurl = evaluate_local_curl(harmonics, gradient_n_m, expansion_order)
+            for k in 1:3
+                set_extra_output!(system, derivatives_switch, i_body, k, curl[k])
+            end
+            for k in 1:9
+                set_extra_output!(system, derivatives_switch, i_body, 3 + k, gradcurl[k])
+            end
+        end
     end
+end
+
+# Coefficients of the derivative along x, y, and z of the harmonic series with
+# coefficients C[:, c, :] (component c of `gradient_n_m`), at the term (n, m)
+# with index i (the same index shifts as the vector gradient in `evaluate_local`)
+@inline function _derivative_coefficients(C, c, i, n, m)
+    @inbounds if m == 0
+        dx = (-C[2,c,i+n+2], zero(eltype(C)))
+        dy = (-C[1,c,i+n+2], zero(eltype(C)))
+        dz = (-C[1,c,i+n+1], -C[2,c,i+n+1])
+    else
+        dx = (-(C[2,c,i+n] + C[2,c,i+n+2]) * 0.5, (C[1,c,i+n] + C[1,c,i+n+2]) * 0.5)
+        dy = ((C[1,c,i+n] - C[1,c,i+n+2]) * 0.5, (C[2,c,i+n] - C[2,c,i+n+2]) * 0.5)
+        dz = (-C[1,c,i+n+1], -C[2,c,i+n+1])
+    end
+    return dx, dy, dz
+end
+
+"""
+    evaluate_local_curl(harmonics, gradient_n_m, expansion_order) -> curl, gradcurl
+
+Curl ω = ∇×v of the vector field of a local expansion and its gradient
+(`gradcurl[i, k] = ∂ω_i/∂x_k`, column major) at the point where the regular
+harmonics `harmonics` were last evaluated, given the expansion of the vector
+field in `gradient_n_m[:, 1:3, :]` as left by `evaluate_local` (with the
+hessian requested). The expansion of the curl follows from that of the field
+by one more index shift (derivatives of the regular harmonics are regular
+harmonics of one degree less), and its gradient by another, so it needs no
+other expansion. It is stored in `gradient_n_m[:, 4:6, :]`.
+"""
+function evaluate_local_curl(harmonics, gradient_n_m, expansion_order)
+
+    TF = eltype(gradient_n_m)
+    C = gradient_n_m
+
+    # Expansion of the curl, for n ≤ p - 1
+    i = 0
+    for n in 0:expansion_order-1, m in 0:n
+        i += 1
+        (vx_x, vx_y, vx_z) = _derivative_coefficients(C, 1, i, n, m)
+        (vy_x, vy_y, vy_z) = _derivative_coefficients(C, 2, i, n, m)
+        (vz_x, vz_y, vz_z) = _derivative_coefficients(C, 3, i, n, m)
+        @inbounds begin
+            # ω_x = ∂_y v_z - ∂_z v_y, ω_y = ∂_z v_x - ∂_x v_z, ω_z = ∂_x v_y - ∂_y v_x
+            C[1,4,i] = vz_y[1] - vy_z[1];   C[2,4,i] = vz_y[2] - vy_z[2]
+            C[1,5,i] = vx_z[1] - vz_x[1];   C[2,5,i] = vx_z[2] - vz_x[2]
+            C[1,6,i] = vy_x[1] - vx_y[1];   C[2,6,i] = vy_x[2] - vx_y[2]
+        end
+    end
+
+    # Evaluate the curl (n ≤ p - 1) and its gradient (n ≤ p - 2)
+    w = MVector{3,TF}(0, 0, 0)
+    gw = MMatrix{3,3,TF,9}(0, 0, 0, 0, 0, 0, 0, 0, 0)
+    i = 0
+    for n in 0:expansion_order-1, m in 0:n
+        i += 1
+        f = m == 0 ? one(TF) : 2*one(TF)
+        @inbounds Rr, Ri = harmonics[1,1,i], harmonics[2,1,i]
+        for c in 1:3
+            @inbounds w[c] += f * (C[1,3+c,i] * Rr - C[2,3+c,i] * Ri)
+            if n <= expansion_order - 2
+                (dx, dy, dz) = _derivative_coefficients(C, 3+c, i, n, m)
+                gw[c,1] += f * (dx[1] * Rr - dx[2] * Ri)
+                gw[c,2] += f * (dy[1] * Rr - dy[2] * Ri)
+                gw[c,3] += f * (dz[1] * Rr - dz[2] * Ri)
+            end
+        end
+    end
+
+    return SVector(w) * ONE_OVER_4π, SMatrix(gw) * ONE_OVER_4π
 end
 
 function evaluate_local(Δx, harmonics, gradient_n_m, local_expansion, expansion_order, ::Val{LH}, ::DerivativesSwitch{PS,GS,HS}) where {LH,PS,GS,HS}

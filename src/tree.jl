@@ -2088,7 +2088,9 @@ function initialize_gradient_n_m(expansion_order, type=Float64)
 
     p = expansion_order
     n_harmonics = harmonic_index(p,p)
-    return zeros(type, 2, 3, n_harmonics)
+    # NOTE: components 1:3 hold the expansion of the vector field, and 4:6 that of
+    #       its curl (see `evaluate_local_curl`)
+    return zeros(type, 2, 6, n_harmonics)
 end
 
 function initialize_harmonics(expansion_order, type=Float64)
